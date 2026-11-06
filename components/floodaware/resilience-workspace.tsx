@@ -4,11 +4,9 @@ import dynamic from 'next/dynamic'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import useSWR from 'swr'
 import { AlertTriangle, Bell, ChevronLeft, ChevronRight, CloudRain, Droplets, Expand, Layers3, LocateFixed, MapPin, Navigation, RefreshCw, ShieldAlert, WifiOff, X } from 'lucide-react'
-import type { User } from '@supabase/supabase-js'
-import { AccountPanel } from '@/components/floodaware/account-panel'
 import { PlaceSearch, type PlaceSearchStatus } from '@/components/floodaware/place-search'
 import { ReportDialog, type NewReportInput } from '@/components/floodaware/report-dialog'
-import { WorkspaceTabContent, type SavedPlace, type WorkspacePanelsProps, type WorkspaceTab } from '@/components/floodaware/workspace-panels'
+import { WorkspaceTabContent, type WorkspacePanelsProps, type WorkspaceTab } from '@/components/floodaware/workspace-panels'
 import { getSupabaseBrowserClient } from '@/lib/supabase/client'
 import {
   buildRiskZones,
@@ -46,7 +44,6 @@ const tabItems: Array<{ id: WorkspaceTab; label: string; icon: typeof MapPin }> 
   { id: 'hotspots', label: 'Hotspots', icon: ShieldAlert },
   { id: 'underpasses', label: 'Underpasses', icon: MapPin },
   { id: 'analytics', label: 'Analytics', icon: Droplets },
-  { id: 'saved', label: 'Saved & alerts', icon: Bell },
   { id: 'emergency', label: 'Emergency', icon: WifiOff },
   { id: 'settings', label: 'Settings', icon: RefreshCw },
   { id: 'about', label: 'About', icon: Layers3 },
@@ -144,20 +141,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
   const mapChangedRef = useRef(false)
   const dragStartY = useRef<number | null>(null)
 
-  const sessionState = useSWR<User | null>(supabase ? 'floodaware:current-user' : null, async () => {
-    if (!supabase) return null
-    const { data, error } = await supabase.auth.getUser()
-    if (error && error.name !== 'AuthSessionMissingError') throw error
-    return data.user ?? null
-  }, { revalidateOnFocus: true, dedupingInterval: 20_000 })
-  const user = sessionState.data ?? null
-
-  useEffect(() => {
-    if (!supabase) return
-    const { data } = supabase.auth.onAuthStateChange(() => { void sessionState.mutate() })
-    return () => data.subscription.unsubscribe()
-  }, [sessionState.mutate, supabase])
-
   useEffect(() => {
     let active = true
     let cachedCenter: GeoPoint | null = null
@@ -242,20 +225,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
   const routeKey = routeRequest ? `routes:${routeRequest.mode}:${routeRequest.start.latitude.toFixed(4)}:${routeRequest.start.longitude.toFixed(4)}:${routeRequest.destination.latitude.toFixed(4)}:${routeRequest.destination.longitude.toFixed(4)}` : null
   const routeState = useSWR<CachedResult<{ routes: RawRoute[] }>>(routeKey, () => routeRequest ? fetchRoutes(routeRequest.start, routeRequest.destination, false, routeRequest.mode) : Promise.reject(new Error('Choose a route first')), { revalidateOnFocus: false, dedupingInterval: 60_000, keepPreviousData: true })
   const routes = useMemo<RouteComparison[]>(() => compareRoutes(routeState.data?.data.routes ?? [], activeReports), [routeState.data, activeReports, now])
-  const profileState = useSWR(supabase && user ? `floodaware:profile:${user.id}` : null, async () => {
-    if (!supabase || !user) return null
-    const { data, error } = await supabase.from('profiles').select('id, display_name, preferred_language, notification_opt_in, role').eq('id', user.id).maybeSingle()
-    if (error) throw error
-    return data as import('@/components/floodaware/account-panel').FloodAwareProfile | null
-  }, { revalidateOnFocus: true })
-  const savedPlacesState = useSWR<SavedPlace[]>(supabase && user ? `floodaware:saved-places:${user.id}` : null, async () => {
-    if (!supabase || !user) return []
-    const { data, error } = await supabase.from('saved_places').select('id, label, category, latitude, longitude, radius_meters').eq('user_id', user.id).order('created_at', { ascending: true })
-    if (error) throw error
-    return (data ?? []) as SavedPlace[]
-  }, { revalidateOnFocus: true })
-  const savedPlacesStatus: WorkspacePanelsProps['savedPlacesState'] = !user ? 'signed-out' : savedPlacesState.data ? 'ready' : savedPlacesState.error ? (isMissingSchema(savedPlacesState.error) ? 'schema-required' : 'failed') : 'loading'
-  const savedPlaces = savedPlacesState.data ?? []
 
   useEffect(() => {
     if (!supabase || reportSourceState !== 'ready') return
@@ -265,16 +234,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
       .subscribe()
     return () => { void supabase.removeChannel(channel) }
   }, [reportSourceState, reportState.mutate, supabase])
-
-  useEffect(() => {
-    if (!supabase || !user || !profileState.data?.notification_opt_in || typeof Notification === 'undefined' || Notification.permission !== 'granted') return
-    const channel = supabase.channel(`floodaware-alerts-${user.id}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'user_alerts', filter: `user_id=eq.${user.id}` }, (payload) => {
-        const alert = payload.new as { title?: string; body?: string }
-        if (alert.title) new Notification(alert.title, { body: alert.body ?? 'A new flood update is near one of your saved places.' })
-      }).subscribe()
-    return () => { void supabase.removeChannel(channel) }
-  }, [profileState.data?.notification_opt_in, supabase, user])
 
   const tileStatus = useCallback((status: 'loading' | 'responded' | 'failed') => {
     setMapTileStatus((current) => status === 'loading' ? 'loading' : status === 'responded' ? current === 'failed' || current === 'partial' ? 'partial' : 'responded' : current === 'responded' || current === 'partial' ? 'partial' : 'failed')
@@ -320,24 +279,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     setActiveTab('routes')
   }
 
-  async function confirmReport(id: string) {
-    if (!user) { setActiveTab('settings'); announce('Sign in to confirm or clear a community report.'); return }
-    if (!supabase || reportSourceState !== 'ready') { announce('Report verification is unavailable until Supabase setup is applied.'); return }
-    const { error } = await supabase.from('report_votes').upsert({ report_id: id, user_id: user.id, vote_type: 'confirm' }, { onConflict: 'report_id,user_id' })
-    if (error) { announce('Your confirmation could not be saved. Retry after checking your connection.'); return }
-    await reportState.mutate()
-    announce('Report confirmed. Its six-hour expiry is extended.')
-  }
-
-  async function clearReport(id: string) {
-    if (!user) { setActiveTab('settings'); announce('Sign in to confirm or clear a community report.'); return }
-    if (!supabase || reportSourceState !== 'ready') { announce('Report verification is unavailable until Supabase setup is applied.'); return }
-    const { error } = await supabase.from('report_votes').upsert({ report_id: id, user_id: user.id, vote_type: 'cleared' }, { onConflict: 'report_id,user_id' })
-    if (error) { announce('Your clear vote could not be saved. Retry after checking your connection.'); return }
-    await reportState.mutate()
-    announce('Clear vote saved. Three votes resolve a report.')
-  }
-
   async function submitReport(input: NewReportInput) {
     if (!supabase || reportSourceState !== 'ready') return { error: 'Supabase reporting is not ready. The database schema and create-report Edge Function must be applied first.' }
     const { error } = await supabase.functions.invoke('create-report', { body: {
@@ -358,52 +299,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     return {}
   }
 
-  async function savePlace(place: Place, label: string, category: SavedPlace['category']) {
-    if (!supabase || !user) throw new Error('Sign in before saving a place.')
-    const { error } = await supabase.from('saved_places').insert({ user_id: user.id, label, category, latitude: place.latitude, longitude: place.longitude, radius_meters: 1500 })
-    if (error) throw new Error('This place could not be saved. Supabase setup may still be pending.')
-    await savedPlacesState.mutate()
-    announce('Saved place added.')
-  }
-
-  async function deletePlace(id: string) {
-    if (!supabase || !user) return
-    const { error } = await supabase.from('saved_places').delete().eq('id', id).eq('user_id', user.id)
-    if (error) { announce('Saved place could not be removed.'); return }
-    await savedPlacesState.mutate()
-    announce('Saved place removed.')
-  }
-
-  async function enableNotifications() {
-    if (!user) { setActiveTab('settings'); announce('Sign in and opt in to enable nearby notifications.'); return }
-    if (!('Notification' in window)) { announce('Browser notifications are not supported here.'); return }
-    const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
-    if (permission !== 'granted') { announce('Notification permission was not granted.'); return }
-    if (!supabase || profileState.error || !profileState.data) { announce('Profile notification preferences need the Supabase schema.'); return }
-    const { error } = await supabase.from('profiles').update({ notification_opt_in: true }).eq('id', user.id)
-    if (error) { announce('Notification preference could not be saved.'); return }
-    await profileState.mutate()
-    announce('Nearby browser notifications are enabled.')
-  }
-
-  async function clearSavedData() {
-    if (!supabase || !user) { announce('Sign in before clearing saved data.'); return }
-    if (!window.confirm('Delete all saved places and routes from your account?')) return
-    const places = await supabase.from('saved_places').delete().eq('user_id', user.id)
-    const routesResult = await supabase.from('saved_routes').delete().eq('user_id', user.id)
-    if (places.error || routesResult.error) { announce('Saved data could not be cleared. Supabase setup may still be pending.'); return }
-    await savedPlacesState.mutate()
-    announce('Saved places and routes cleared.')
-  }
-
-  async function moderateReport(id: string, status: 'active' | 'removed') {
-    if (!supabase || (profile?.role !== 'moderator' && profile?.role !== 'admin')) { announce('Moderator access is required for this action.'); return }
-    const { error } = await supabase.rpc('moderate_flood_report', { p_report_id: id, p_status: status })
-    if (error) { announce('Moderation action could not be saved. Check the Supabase setup.'); return }
-    await reportState.mutate()
-    announce(status === 'removed' ? 'Report removed from the public map.' : 'Report restored to the public map.')
-  }
-
   async function refreshData() {
     if (refreshing) return
     setRefreshing(true)
@@ -422,14 +317,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
   function toggleFullscreen() {
     if (!document.fullscreenElement) void document.documentElement.requestFullscreen().then(() => setFullscreen(true)).catch(() => announce('Fullscreen mode is unavailable in this browser.'))
     else void document.exitFullscreen().then(() => setFullscreen(false))
-  }
-
-  async function saveSelectedRoute(route: RouteComparison) {
-    if (!supabase || !user) { setActiveTab('settings'); announce('Sign in to save routes.'); return }
-    if (reportSourceState !== 'ready') { announce('Route storage is unavailable until Supabase setup is applied.'); return }
-    if (!routeRequest) return
-    const { error } = await supabase.from('saved_routes').insert({ user_id: user.id, name: `Route ${route.label}`, route_mode: routeRequest.mode, start_latitude: routeRequest.start.latitude, start_longitude: routeRequest.start.longitude, end_latitude: routeRequest.destination.latitude, end_longitude: routeRequest.destination.longitude, route_geojson: { type: 'LineString', coordinates: route.coordinates }, distance_meters: route.distanceMeters, duration_seconds: route.durationSeconds, risk_score: route.riskScore })
-    announce(error ? 'Route could not be saved. Check Supabase setup.' : 'Route saved to your account.')
   }
 
   async function shareSelectedRoute(route: RouteComparison) {
@@ -467,9 +354,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     { name: 'Place search · Nominatim', state: nominatimStatus === 'responded' ? 'responded' as const : nominatimStatus === 'failed' ? 'failed' as const : nominatimStatus === 'loading' ? 'loading' as const : 'idle' as const },
     { name: 'Routes · OSRM', state: statusFor(routeState.data, routeState.isLoading, routeState.error), updatedAt: routeState.data?.updatedAt },
   ]
-  const profile = profileState.data ?? null
-  const profileError = profileState.error ? (isMissingSchema(profileState.error) ? 'Profile storage is not initialized.' : 'Profile could not be loaded.') : null
-  const notificationOptIn = Boolean(profile?.notification_opt_in && typeof Notification !== 'undefined' && Notification.permission === 'granted')
   const reportSourceMessage = reportSourceState === 'schema-required' ? 'Supabase schema setup pending' : reportSourceState === 'failed' ? 'Supabase reports unavailable' : reportSourceState === 'ready' ? 'Live telemetry connected' : reportSourceState === 'not-configured' ? 'Supabase unavailable' : 'Connecting to telemetry'
   const sheetHeight = sheetState === 'peek' ? '184px' : sheetState === 'half' ? '52dvh' : '88dvh'
   const contentProps: WorkspacePanelsProps = {
@@ -492,9 +376,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     elevationAvailable: Boolean(elevationState.data?.data.length),
     rainfallAdvisory,
     reportSourceState,
-    userId: user?.id ?? null,
-    profileRole: profile?.role ?? null,
-    onModerateReport: (id: string, status: 'active' | 'removed') => void moderateReport(id, status),
     layers,
     onLayerToggle: (key: keyof MapLayers) => setLayers((current) => ({ ...current, [key]: !current[key] })),
     rainfallLayer,
@@ -505,8 +386,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     onNavigateTab: setActiveTab,
     onViewPoint: viewPoint,
     onViewReport: viewReport,
-    onConfirmReport: (id: string) => void confirmReport(id),
-    onClearReport: (id: string) => void clearReport(id),
     currentLocationLabel: locationStatus === 'live' ? 'Your location' : `Map center · ${locationLabel}`,
     routeUpdatedAt: routeState.data?.updatedAt,
     routes,
@@ -516,12 +395,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     onRequestRoutes: requestRoutes,
     onSelectRoute: setSelectedRouteId,
     onRetryRoutes: () => routeRequest && void routeState.mutate(fetchRoutes(routeRequest.start, routeRequest.destination, true, routeRequest.mode), { revalidate: false }),
-    savedPlaces,
-    savedPlacesState: savedPlacesStatus,
-    onSavePlace: savePlace,
-    onDeletePlace: (id: string) => void deletePlace(id),
-    notificationsEnabled: notificationOptIn,
-    onEnableNotifications: () => void enableNotifications(),
     onRefresh: () => void refreshData(),
     refreshing,
     dataSources,
@@ -533,10 +406,7 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
     onDistanceUnitChange: setDistanceUnit,
     reduceMotion,
     onReduceMotionChange: setReduceMotion,
-    onClearSavedData: () => void clearSavedData(),
-    accountPanel: <AccountPanel user={user} profile={profile} profileError={profileError} supabase={supabase} onProfileSaved={() => void profileState.mutate()} />,
     onRetryReports: () => void reportState.mutate(),
-    onSaveRoute: (route: RouteComparison) => void saveSelectedRoute(route),
     onShareRoute: (route: RouteComparison) => void shareSelectedRoute(route),
   }
 
@@ -570,8 +440,6 @@ export function ResilienceWorkspace({ initialNow }: { initialNow: number }) {
           layers={layers}
           pickingReportPin={pickingReportPin}
           onPickReportPin={(point) => { setPinPoint(point); setPickingReportPin(false); setReportDialogOpen(true) }}
-          onConfirmReport={(id) => void confirmReport(id)}
-          onClearReport={(id) => void clearReport(id)}
           onSelectRoute={setSelectedRouteId}
           onTileStatusChange={tileStatus}
           mapType={mapType}

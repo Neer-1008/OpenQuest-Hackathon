@@ -650,8 +650,6 @@ export function FloodAwareApp({ initialNow }: { initialNow: number }) {
               layers={layers}
               pickingReportPin={pickingReportPin}
               onPickReportPin={handleMapPin}
-              onConfirmReport={handleConfirmReport}
-              onClearReport={handleClearReport}
               onSelectRoute={setSelectedRouteId}
               onTileStatusChange={updateMapTileStatus}
             />

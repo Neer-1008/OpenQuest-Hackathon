@@ -80,12 +80,8 @@ function MapClickHandler({ picking, onPick }: { picking: boolean; onPick: (point
 
 function ReportPopup({
   report,
-  onConfirm,
-  onClear,
 }: {
   report: FloodReport
-  onConfirm: (id: string) => void
-  onClear: (id: string) => void
 }) {
   return (
     <div className="map-popup-card">
@@ -101,16 +97,6 @@ function ReportPopup({
       {report.clearedVotes > 0 && <p className="popup-meta">Cleared votes: {report.clearedVotes} of 3</p>}
       {report.photoDataUrl && <img className="popup-photo" src={report.photoDataUrl} alt="Community report of street waterlogging" />}
       {report.reporterName && <p className="popup-meta">Shared by {report.reporterName}</p>}
-      {isReportActive(report) && (
-        <div className="popup-actions">
-          <button className="popup-action popup-action-primary" type="button" onClick={() => onConfirm(report.id)}>
-            Confirm
-          </button>
-          <button className="popup-action" type="button" onClick={() => onClear(report.id)}>
-            It&apos;s cleared
-          </button>
-        </div>
-      )}
     </div>
   )
 }
@@ -135,8 +121,6 @@ type FloodMapProps = {
   layers: MapLayers
   pickingReportPin: boolean
   onPickReportPin: (point: GeoPoint) => void
-  onConfirmReport: (id: string) => void
-  onClearReport: (id: string) => void
   onSelectRoute: (id: string) => void
   onTileStatusChange: (status: 'loading' | 'responded' | 'failed') => void
   mapType?: FloodMapType
@@ -153,8 +137,6 @@ export function FloodMap({
   layers,
   pickingReportPin,
   onPickReportPin,
-  onConfirmReport,
-  onClearReport,
   onSelectRoute,
   onTileStatusChange,
   mapType = 'roadmap',
@@ -264,7 +246,7 @@ export function FloodMap({
           opacity={isReportActive(report) ? 1 : 0.58}
         >
           <Popup>
-            <ReportPopup report={report} onConfirm={onConfirmReport} onClear={onClearReport} />
+            <ReportPopup report={report} />
           </Popup>
         </Marker>
       ))}
